@@ -2,15 +2,30 @@
 
 import argparse
 import json
+import r2pipe
 import re
 import sys
+
+from pprint import pprint
 
 class RekallProfile:
     """ Rekall Profile Generator """
 
+    structs = [
+        'cred',
+        'mm_struct',
+        'task_struct'
+    ]
+
+    types = {
+        'u32' : 'unsigned int',
+        'u64' : 'long long unsigned int',
+    }
+
     def __init__(self, args):
         self.config_path = args.config
         self.sysmap_path = args.sysmap
+        self.dwarf_path = args.dwarf
         self.dict_config = {}
         self.dict_sysmap = {}
         self.dict_enums = {}
@@ -20,6 +35,7 @@ class RekallProfile:
         self.dict_profile = {}
         self.profile_path = 'profile'
         self.profile = open(self.profile_path, 'w')
+        self.r2 = r2pipe.open(self.dwarf_path)
 
     def generate_profile(self):
         self.dict_profile['$CONFIG'] = self.dict_config
@@ -30,7 +46,7 @@ class RekallProfile:
         self.dict_profile['$STRUCTS'] = self.dict_struct
 
         with open(self.profile_path, 'w') as profile:
-            str = json.dumps(self.dict_profile, indent=2, sort_keys=True,
+            str = json.dumps(self.dict_profile, indent=1, sort_keys=True,
                              separators=(',', ': '))
             profile.write(str)
 
@@ -68,11 +84,63 @@ class RekallProfile:
                     continue
                 self.parse_config_line(line.rstrip('\n'))
 
+    def parse_dwarf(self):
+        self.r2.cmd('aaa')
+        self.r2.cmd('iddi {0}'.format(self.dwarf_path))
+
+        for struct in RekallProfile.structs:
+            str_structdef = self.r2.cmd('idddj {0}'.format(struct))
+            dict_structdef = json.loads(str_structdef)
+
+            self.dict_struct[struct] = []
+            self.dict_struct[struct].append(dict_structdef['size'])
+
+            rk_entry = {}
+            for field in dict_structdef['members']:
+                offset = field['offset']
+                t = field['type'].rstrip(' *')
+                t = re.sub(r'(struct |const |volatile )', r'', t)
+
+                # Normalize types.
+                if t in RekallProfile.types:
+                    t = RekallProfile.types[t]
+
+                rk_entry[field['name']] = [offset]
+                if field['array']:
+                    # XXX: We do not allow more than one dim arrays!
+                    array_dim = field['array_dimension'][0]
+
+                    if field['pointer']:
+                        rk_entry[field['name']].append(['Array', {
+                                                            'count' : array_dim,
+                                                            'target' : 'Pointer',
+                                                            'target_args' : {
+                                                                'target' : t,
+                                                                'target_args' : None
+                                                            }
+                                                       }])
+                    else:
+                        rk_entry[field['name']].append(['Array', {
+                                                            'count' : array_dim,
+                                                            'target' : t,
+                                                            'target_args' : None
+                                                       }])
+                elif field['pointer']:
+                    rk_entry[field['name']].append(['Pointer', {
+                                                        'target' : t,
+                                                        'target_args' : None
+                                                    }])
+                else:
+                    rk_entry[field['name']].append([t])
+
+            self.dict_struct[struct].append(rk_entry)
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
 
     parser.add_argument('-c', '--config', help='Path to Linux config')
     parser.add_argument('-s', '--sysmap', help='Path to Sytem.map')
+    parser.add_argument('-d', '--dwarf', help='Path to file with DWARF debugging information')
 
     args = parser.parse_args()
 
@@ -80,4 +148,5 @@ if __name__ == "__main__":
 
     rp.parse_config()
     rp.parse_sysmap()
+    rp.parse_dwarf()
     rp.generate_profile()
