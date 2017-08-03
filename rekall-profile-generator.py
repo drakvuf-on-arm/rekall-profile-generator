@@ -22,6 +22,10 @@ class RekallProfile:
         'u64' : 'long long unsigned int',
     }
 
+    meta_info = {
+        'linux' : 'Linux'
+    }
+
     def __init__(self, args):
         self.config_path = args.config
         self.sysmap_path = args.sysmap
@@ -83,6 +87,22 @@ class RekallProfile:
                 if line.startswith('#'):
                     continue
                 self.parse_config_line(line.rstrip('\n'))
+
+    def parse_meta(self):
+        str_meta = self.r2.cmd('ij')
+        dict_meta = json.loads(str_meta)
+
+        pprint(dict_meta)
+
+        os = dict_meta['bin']['os']
+        if os in RekallProfile.meta_info:
+            self.dict_metadata['ProfileClass'] = RekallProfile.meta_info[os]
+        else:
+            self.dict_metadata['ProfileClass'] = os
+
+        self.dict_metadata['Type'] = 'Profile'
+        self.dict_metadata['Version'] = 1337
+        self.dict_metadata['arch'] = dict_meta['bin']['arch'] 
 
     def parse_dwarf(self):
         self.r2.cmd('aaa')
@@ -149,4 +169,5 @@ if __name__ == "__main__":
     rp.parse_config()
     rp.parse_sysmap()
     rp.parse_dwarf()
+    rp.parse_meta()
     rp.generate_profile()
