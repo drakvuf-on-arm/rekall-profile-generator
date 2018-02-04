@@ -57,6 +57,10 @@ class RekallProfile:
     def parse_sysmap_line(self, line):
         triple = line.split(' ')
 
+        # We are not interested in the uninitialized data section.
+        if triple[1].upper() == 'B' or triple[1] == 'd':
+            return
+
         # Address limited to 48 bit.
         addr = int(triple[0], 16) & ((1<<48)-1)
 
@@ -102,7 +106,65 @@ class RekallProfile:
 
         self.dict_metadata['Type'] = 'Profile'
         self.dict_metadata['Version'] = 1337
-        self.dict_metadata['arch'] = dict_meta['bin']['arch'] 
+        self.dict_metadata['arch'] = dict_meta['bin']['arch']
+
+    def parse_dwarf_struct(self, struct, t):
+        rk_entry = [t]
+
+        return rk_entry
+
+    def parse_dwarf_pointer(self, pointer, t):
+        rk_entry = ['Pointer', {
+                        'target' : t,
+                        'target_args' : None
+                    }]
+
+        return rk_entry
+
+    def parse_dwarf_array(self, arr, t):
+        rk_entry = {}
+        # XXX: We do not allow more than one dim arrays!
+        array_dim = arr['array_dimension'][0]
+
+        if arr['pointer']:
+            rk_entry = ['Array', {
+                            'count' : array_dim,
+                            'target' : 'Pointer',
+                            'target_args' : {
+                                'target' : t,
+                                'target_args' : None
+                            }
+                        }]
+        else:
+            rk_entry = ['Array', {
+                            'count' : array_dim,
+                            'target' : t,
+                            'target_args' : None
+                        }]
+
+        return rk_entry
+
+    def parse_dwarf_field(self, field):
+        rk_entry = {}
+
+        offset = field['offset']
+        t = field['type'].rstrip(' *')
+        t = re.sub(r'(struct |const |volatile )', r'', t)
+
+        # Normalize types.
+        if t in RekallProfile.types:
+            t = RekallProfile.types[t]
+
+        rk_entry[field['name']] = [offset]
+
+        if field['array']:
+            rk_entry[field['name']].append(self.parse_dwarf_array(field, t))
+        elif field['pointer']:
+            rk_entry[field['name']].append(self.parse_dwarf_pointer(field, t))
+        else:
+            rk_entry[field['name']].append(self.parse_dwarf_struct(field, t))
+
+        return rk_entry
 
     def parse_dwarf(self):
         self.r2.cmd('aaa')
@@ -112,48 +174,73 @@ class RekallProfile:
             str_structdef = self.r2.cmd('idddj {0}'.format(struct))
             dict_structdef = json.loads(str_structdef)
 
-            self.dict_struct[struct] = []
-            self.dict_struct[struct].append(dict_structdef['size'])
+            self.dict_struct[struct] = [dict_structdef['size']]
 
-            rk_entry = {}
+            dict_fields = {}
             for field in dict_structdef['members']:
-                offset = field['offset']
-                t = field['type'].rstrip(' *')
-                t = re.sub(r'(struct |const |volatile )', r'', t)
+                if not field['array'] and not field['pointer']:
+                    """
+                    The Linux kernel uses the macros
+                    'randomized_struct_fields_(start|end)' to randomize struct
+                    contents. The randomization yields an unnamed struct which
+                    we have to detect and handle appropriately. Otherwise,
+                    contents of that struct will not be listed in the profile.
 
-                # Normalize types.
-                if t in RekallProfile.types:
-                    t = RekallProfile.types[t]
+                    Despite this radomization theme, we have to ensure that we
+                    store the fields of the unnamed, randomized struct at the
+                    same level as all other fields of the struct. That is,
+                    instead of storing
 
-                rk_entry[field['name']] = [offset]
-                if field['array']:
-                    # XXX: We do not allow more than one dim arrays!
-                    array_dim = field['array_dimension'][0]
+                    "task_struct": [
+                     3200,
+                     {
+                      {
+                       "" : [
+                        "acct_rss_mem1" : [
+                         1864,
+                         [...]
+                        ],
+                       ]
+                      }
+                      "thread_info" : [
+                       0,
+                       [...]
+                      ]
+                     }
+                    ]
 
-                    if field['pointer']:
-                        rk_entry[field['name']].append(['Array', {
-                                                            'count' : array_dim,
-                                                            'target' : 'Pointer',
-                                                            'target_args' : {
-                                                                'target' : t,
-                                                                'target_args' : None
-                                                            }
-                                                       }])
+                    we have to ensure the following structure
+
+                    "task_struct": [
+                     3200,
+                     {
+                      "acct_rss_mem1" : [
+                       1864,
+                       [...]
+                      ],
+                      "thread_info" : [
+                       0,
+                       [...]
+                      ]
+                     }
+                    ]
+
+                    As such, we process fields that are not of type pointer or
+                    array already in this function.
+
+                    TODO: Future extensions should think about moving the
+                    following part into the function parse_dwarf_field()
+
+                    """
+                    if field['name'] == "":
+                        for f in field['members']:
+                            dict_fields.update(self.parse_dwarf_field(f))
                     else:
-                        rk_entry[field['name']].append(['Array', {
-                                                            'count' : array_dim,
-                                                            'target' : t,
-                                                            'target_args' : None
-                                                       }])
-                elif field['pointer']:
-                    rk_entry[field['name']].append(['Pointer', {
-                                                        'target' : t,
-                                                        'target_args' : None
-                                                    }])
+                        dict_fields.update(self.parse_dwarf_field(field))
                 else:
-                    rk_entry[field['name']].append([t])
+                    dict_fields.update(self.parse_dwarf_field(field))
 
-            self.dict_struct[struct].append(rk_entry)
+            self.dict_struct[struct].append(dict_fields)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
